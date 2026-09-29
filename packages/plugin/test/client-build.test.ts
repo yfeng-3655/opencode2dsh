@@ -108,7 +108,26 @@ test('settings domain is reached via ctx.get(), lazily, and injected into both s
   // The documented cordis escape, with property access as the fallback.
   assert.match(source, /typeof \w+\.get === ["']function["']/, 'services are probed through ctx.get()')
   assert.ok(source.includes('configForms'), 'the >= 0.1.7 settings domain (configForms) is addressed')
-  assert.match(source, /settingsScope\.bind\(\{ namespace: \w+ \}\)/, 'the <= 0.1.6 settingsScope era is still served')
+  // The namespace-bound era is reached THROUGH THE LOOP that walks the service
+  // names, so the call site reads `settingsScope.bind({ namespace: ... })` only
+  // after the name is read from the table — assert the bind shape, not a single
+  // eager call site (the loop body is what the fix introduced).
+  assert.match(
+    source,
+    /\w+\.bind\(\{ namespace: \w+ \}\)/,
+    'the settingsScope / settings eras are bound with the ip-pool namespace',
+  )
+  // [host-compat regression] A configForms miss (the `dsh plugin add` install
+  // shape, where the plugin is not a managed profile entry) must FALL THROUGH
+  // to the namespace-bound services — the eras are a chain, not an exclusive
+  // switch. Both service names must survive into the bundle.
+  //
+  // Assert on the service names as they are actually EMITTED (string literals),
+  // never on a source-level identifier: the bundler minifies local names, so a
+  // match on `SETTINGS_SERVICE_NAMES` would pin the build tool, not the fix.
+  for (const serviceName of ['"settingsScope"', '"settings"']) {
+    assert.ok(source.includes(serviceName), `the ${serviceName} service name is probed in the shipped bundle`)
+  }
   // Lazy resolution at render time (never a synchronous probe inside apply).
   // The assignment must live INSIDE the void-0 guard: an undefined resolve
   // result is then simply retried on the next render — a cached miss would
@@ -124,4 +143,7 @@ test('settings domain is reached via ctx.get(), lazily, and injected into both s
   assert.ok(source.includes('settings.plugin.item'), 'the legacy plugin-item slot is injected')
   // Hosts without any settings service render their own unavailable row.
   assert.ok(source.includes('unavailable'), 'the no-settings snapshot is carried')
+  // The card is inert without this prefix: it is how every runtime state and
+  // probe action reaches the plugin's loopback bridge.
+  assert.ok(source.includes('/api/opencode2dsh/ip-pool'), 'bridge prefix baked in')
 })

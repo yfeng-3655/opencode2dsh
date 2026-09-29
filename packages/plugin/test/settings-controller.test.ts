@@ -151,11 +151,53 @@ test('a throwing ctx.get falls back to property access instead of killing the ha
   assert.ok(controller, 'property access still reaches the service')
 })
 
-test('configForms present but the entry missing: undefined, and legacy is NOT consulted', () => {
-  let legacyAsked = false
+test('configForms present but the entry missing: falls through to settingsScope', () => {
+  // [host-compat regression] This is the `dsh plugin add` install shape: DSH
+  // provides the configForms domain but this plugin is NOT one of its managed
+  // profile entries, so `configForms.get('opencode2dsh')` is legitimately
+  // undefined. Reading that as "no settings service on this build" silently
+  // dropped the settings card on a host where the namespace-bound service was
+  // right there and would have worked.
+  const namespaces: string[] = []
+  const sentinel = { getSnapshot: () => ({}) } as never
   const host: SettingsHostFace = {
     get: (name: string) => {
       if (name === 'configForms') return { get: () => undefined }
+      if (name === 'settingsScope') {
+        return { bind(options: { namespace: string }) { namespaces.push(options.namespace); return sentinel } }
+      }
+      return undefined
+    },
+  }
+  assert.equal(resolveSectionController(host), sentinel, 'the namespace service behind the miss is still reached')
+  assert.deepEqual(namespaces, ['ip-pool'])
+})
+
+test('configForms without the entry: falls through to the 0.1.7 `settings` service name', () => {
+  // The 0.1.7 line renamed the namespace service settingsScope -> settings, so
+  // a host that has configForms (without our entry) AND `settings` must resolve.
+  const namespaces: string[] = []
+  const sentinel = { getSnapshot: () => ({}) } as never
+  const host: SettingsHostFace = {
+    get: (name: string) => {
+      if (name === 'configForms') return { get: () => undefined }
+      if (name === 'settings') {
+        return { bind(options: { namespace: string }) { namespaces.push(options.namespace); return sentinel } }
+      }
+      return undefined
+    },
+  }
+  assert.equal(resolveSectionController(host), sentinel, 'the renamed settings domain resolves')
+  assert.deepEqual(namespaces, ['ip-pool'])
+})
+
+test('the entry form wins over the namespace services when both exist', () => {
+  const recorded: { entryIds: string[]; mutations: unknown[] } = { entryIds: [], mutations: [] }
+  const { service } = fakeConfigForms(recorded)
+  let legacyAsked = false
+  const host: SettingsHostFace = {
+    get: (name: string) => {
+      if (name === 'configForms') return service
       if (name === 'settingsScope') {
         legacyAsked = true
         return { bind: () => ({}) }
@@ -163,8 +205,21 @@ test('configForms present but the entry missing: undefined, and legacy is NOT co
       return undefined
     },
   }
-  assert.equal(resolveSectionController(host), undefined)
-  assert.equal(legacyAsked, false, 'the two eras are mutually exclusive — no fallthrough')
+  assert.ok(resolveSectionController(host), 'resolved')
+  assert.deepEqual(recorded.entryIds, [ENTRY_ID], 'the managed entry form is preferred')
+  assert.equal(legacyAsked, false, 'the namespace service is not consulted once the entry form answers')
+})
+
+test('a namespace service whose bind throws falls through instead of killing the half', () => {
+  const sentinel = { getSnapshot: () => ({}) } as never
+  const host: SettingsHostFace = {
+    get: (name: string) => {
+      if (name === 'settingsScope') return { bind() { throw new Error('not up yet') } }
+      if (name === 'settings') return { bind: () => sentinel }
+      return undefined
+    },
+  }
+  assert.equal(resolveSectionController(host), sentinel, 'the next era is still attempted')
 })
 
 test('no settings service at all: undefined (never throws)', () => {

@@ -27,8 +27,25 @@ export type SectionController = SettingsScope<IpPoolSettingsValue>
 /** The plugin `Config` field holding the ip-pool section (mirrors the Host half). */
 const IP_POOL_FIELD = 'ipPool'
 
-/** Profile entry id of this plugin, used to address its form on DSH >= 0.1.7. */
+/**
+ * Profile entry id of this plugin, used to address its form on DSH >= 0.1.7.
+ *
+ * NOTE: this is the entry id DSH uses when IT manages the install. A plugin
+ * installed into a profile's `node_modules` directly (the ordinary
+ * `dsh plugin add` / manual install path) is NOT one of those managed entries,
+ * so `configForms.get(ENTRY_ID)` legitimately returns undefined there — which
+ * is why the resolver must treat a configForms miss as "try the next era"
+ * rather than "no settings service on this build".
+ */
 export const ENTRY_ID = 'opencode2dsh'
+
+/**
+ * Settings service names probed, newest first, when `configForms` is absent
+ * (or present without the entry form). `settings` is the 0.1.7+ name of the
+ * same domain that `settingsScope` names on <= 0.1.6; both are namespace-bound
+ * services, so either one yields the section-shaped controller the card wants.
+ */
+const SETTINGS_SERVICE_NAMES = ['settingsScope', 'settings'] as const
 
 /** Settings namespace this plugin registered on DSH <= 0.1.6. */
 const LEGACY_NAMESPACE = 'ip-pool'
@@ -130,11 +147,28 @@ function projectEntryForm(form: EntryFormFace): SectionController {
  * Resolve the settings controller the card edits, on whichever settings
  * service this host provides.
  *
- * The two services are mutually exclusive across releases, so their presence
- * also identifies the addressing scheme. Returns undefined when neither exists,
- * which costs only the settings card — model routing is unaffected.
+ * Attempted in order, each era independent of the last:
  *
- * @param host - the client context (only the two settings services are read).
+ *  1. `configForms.get(ENTRY_ID)` — the >= 0.1.7 profile-ENTRY form. Only hits
+ *     when DSH manages this plugin as an entry of its own.
+ *  2. `settingsScope.bind({ namespace })` — the <= 0.1.6 namespace service,
+ *     which also still answers on newer hosts in some install shapes.
+ *  3. `settings.bind({ namespace })` — the 0.1.7+ name of that same domain.
+ *
+ * [host-compat patch] The attempts are a FALLBACK CHAIN, not a mutually
+ * exclusive switch. They used to be exclusive on the theory that "the two
+ * services identify the addressing scheme", which made a `configForms` service
+ * that does not carry this plugin's entry form a DEAD END: on a
+ * `dsh plugin add` install the plugin is not a managed profile entry, so
+ * `configForms.get('opencode2dsh')` returns undefined, the resolver answered
+ * undefined, and the settings card silently vanished — while the two
+ * namespace-bound services right behind it would have worked. A miss now
+ * costs one attempt, never the whole chain.
+ *
+ * Returns undefined only when no era resolves, which costs the settings card
+ * alone — model routing is unaffected.
+ *
+ * @param host - the client context (only the settings services are read).
  * @returns the section-shaped controller, or undefined when unsupported.
  */
 export function resolveSectionController(host: SettingsHostFace): SectionController | undefined {
@@ -160,12 +194,24 @@ export function resolveSectionController(host: SettingsHostFace): SectionControl
     const configForms = readService('configForms') as ConfigFormsFace | undefined
     if (configForms !== undefined && typeof configForms.get === 'function') {
       const form = configForms.get(ENTRY_ID)
+      // A configForms service WITHOUT this entry form is the ordinary
+      // `dsh plugin add` install shape — fall through to the namespace-bound
+      // services instead of declaring the host unsupported.
       if (form !== undefined && typeof form.getSnapshot === 'function') return projectEntryForm(form)
-      return undefined
     }
-    const settingsScope = readService('settingsScope') as LegacySettingsScopeFace | undefined
-    if (settingsScope !== undefined && typeof settingsScope.bind === 'function') {
-      return settingsScope.bind({ namespace: LEGACY_NAMESPACE })
+    // <= 0.1.6 `settingsScope`, and its >= 0.1.7 rename `settings`. Both
+    // address the registered namespace, so either yields a section controller.
+    // Each attempt is contained on its own: a service that is present but
+    // throws (a provider mid-activation) must not end the chain — the next era
+    // still deserves its turn, and only a fully exhausted chain means
+    // "unsupported host".
+    for (const name of SETTINGS_SERVICE_NAMES) {
+      const service = readService(name) as LegacySettingsScopeFace | undefined
+      if (service === undefined || typeof service.bind !== 'function') continue
+      try {
+        const bound = service.bind({ namespace: LEGACY_NAMESPACE })
+        if (bound !== undefined) return bound
+      } catch { /* this era's provider is not usable — try the next one */ }
     }
   } catch { /* any probing failure costs only the settings card */ }
   return undefined
